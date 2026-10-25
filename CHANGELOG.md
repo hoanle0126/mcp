@@ -1,5 +1,11 @@
 # Changelog
 
+## [4.0.1](https://github.com/webdriverio/mcp/compare/v4.0.0...v4.0.1) (2026-10-25)
+
+### Bug Fixes
+
+* require Node.js 22.23.4, 24.22.1 or 26.12.1 for the eMudhra intermediate CA compromise ([#173](https://github.com/webdriverio/mcp/issues/173)) ([0cc99e7](https://github.com/webdriverio/mcp/commit/0cc99e7af3551d973ca4fd7071128a0f82572091))
+
 ## [4.0.0](https://github.com/webdriverio/mcp/compare/v3.14.0...v4.0.0) (2026-10-08)
 
 ### Features
