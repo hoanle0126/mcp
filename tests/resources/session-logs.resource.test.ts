@@ -51,6 +51,48 @@ describe('readSessionLogs — browser', () => {
     expect(parsed.entries[0].message).toContain('Uncaught TypeError');
     expect(parsed.entries[0].timestamp).toBe(1717000000000);
     expect(parsed.entries[0].timestampISO).toBe(new Date(1717000000000).toISOString());
+    expect(parsed.entries[0].source).toBe('browser');
+  });
+
+  it('fetches both browser and performance log entries with source tags when available', async () => {
+    const getLogs = vi.fn()
+      .mockResolvedValueOnce([
+        { level: 'SEVERE', message: 'Failed to load resource: 500', timestamp: 1717000000000 },
+      ])
+      .mockResolvedValueOnce([
+        { level: 'INFO', message: '{"message":{"method":"Network.responseReceived","params":{"response":{"status":500}}}}', timestamp: 1717000001000 },
+      ]);
+
+    mockGetBrowser.mockReturnValue({
+      getLogTypes: vi.fn().mockResolvedValue(['browser', 'performance', 'driver']),
+      getLogs,
+    });
+
+    const result = await readSessionLogs();
+    const parsed = JSON.parse(result.text);
+
+    expect(getLogs).toHaveBeenCalledTimes(2);
+    expect(getLogs).toHaveBeenNthCalledWith(1, 'browser');
+    expect(getLogs).toHaveBeenNthCalledWith(2, 'performance');
+    expect(parsed.entries).toHaveLength(2);
+    expect(parsed.entries[0].source).toBe('browser');
+    expect(parsed.entries[1].source).toBe('performance');
+    expect(parsed.entries[1].message).toContain('Network.responseReceived');
+  });
+
+  it('continues when performance log fetch throws', async () => {
+    mockGetBrowser.mockReturnValue({
+      getLogTypes: vi.fn().mockResolvedValue(['browser', 'performance']),
+      getLogs: vi.fn()
+        .mockResolvedValueOnce([{ level: 'SEVERE', message: 'Console error', timestamp: 1717000000000 }])
+        .mockRejectedValueOnce(new Error('performance log disabled')),
+    });
+
+    const result = await readSessionLogs();
+    const parsed = JSON.parse(result.text);
+    expect(parsed.entries).toHaveLength(1);
+    expect(parsed.entries[0].source).toBe('browser');
+    expect(parsed.entries[0].message).toBe('Console error');
   });
 
   it('returns empty entries when no logs exist', async () => {

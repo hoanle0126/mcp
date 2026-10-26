@@ -65,10 +65,12 @@ export class LocalBrowserProvider implements SessionProvider {
       case 'chrome':
         capabilities.browserName = 'chrome';
         capabilities['goog:chromeOptions'] = { args: chromiumArgs };
+        capabilities['goog:loggingPrefs'] = { browser: 'ALL', performance: 'ALL' };
         break;
       case 'edge':
         capabilities.browserName = 'msedge';
         capabilities['ms:edgeOptions'] = { args: chromiumArgs };
+        capabilities['ms:loggingPrefs'] = { browser: 'ALL', performance: 'ALL' };
         break;
       case 'firefox':
         capabilities.browserName = 'firefox';
@@ -85,7 +87,9 @@ export class LocalBrowserProvider implements SessionProvider {
       ...capabilities,
       ...userCapabilities,
       'goog:chromeOptions': this.mergeCapabilityOptions(capabilities['goog:chromeOptions'], userCapabilities['goog:chromeOptions']),
+      'goog:loggingPrefs': this.mergeCapabilityOptions(capabilities['goog:loggingPrefs'], userCapabilities['goog:loggingPrefs']),
       'ms:edgeOptions': this.mergeCapabilityOptions(capabilities['ms:edgeOptions'], userCapabilities['ms:edgeOptions']),
+      'ms:loggingPrefs': this.mergeCapabilityOptions(capabilities['ms:loggingPrefs'], userCapabilities['ms:loggingPrefs']),
       'moz:firefoxOptions': this.mergeCapabilityOptions(capabilities['moz:firefoxOptions'], userCapabilities['moz:firefoxOptions']),
     };
 

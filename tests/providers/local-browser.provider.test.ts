@@ -34,6 +34,14 @@ describe('LocalBrowserProvider', () => {
     expect(args).toContain('--custom-flag');
   });
 
+  it.each([
+    ['chrome', 'goog:loggingPrefs'],
+    ['edge', 'ms:loggingPrefs'],
+  ])('buildCapabilities: %s enables browser and performance loggingPrefs', (browser, prefKey) => {
+    const caps = localBrowserProvider.buildCapabilities({ browser });
+    expect(caps[prefKey]).toEqual({ browser: 'ALL', performance: 'ALL' });
+  });
+
   it('getSessionType returns browser', () => {
     expect(localBrowserProvider.getSessionType({})).toBe('browser');
   });

@@ -17,7 +17,7 @@ interface SessionLogsResult {
 
 /**
  * Fetch logs appropriate to the current session type:
- * - browser: console logs + JS exceptions via getLogs('browser')
+ * - browser: console logs + JS exceptions via getLogs('browser') and network/CDP events via getLogs('performance')
  * - android: system/crash logs via getLogs('logcat')
  * - ios: crash logs via getLogs('crashlog') + system logs via getLogs('syslog')
  */
@@ -33,17 +33,31 @@ async function fetchLogsForSession(sessionType: string): Promise<{ logTypes: str
 
   switch (sessionType) {
     case 'browser': {
-      // Console output + uncaught JS exceptions
-      const logType = 'browser';
-      if (availableTypes.includes(logType)) {
-        const raw: Array<{ level: string; message: string; timestamp: number }> =
-          await (b.getLogs as (t: string) => Promise<Array<{ level: string; message: string; timestamp: number }>>)(logType);
-        entries.push(...raw.map((e) => ({
-          level: e.level,
-          message: e.message,
-          timestamp: e.timestamp,
-          timestampISO: new Date(e.timestamp).toISOString(),
-        })));
+      // Console output + uncaught JS exceptions + network/performance events
+      const errors: string[] = [];
+      let attempted = 0;
+      let succeeded = 0;
+      for (const logType of ['browser', 'performance']) {
+        if (availableTypes.includes(logType)) {
+          attempted++;
+          try {
+            const raw: Array<{ level: string; message: string; timestamp: number }> =
+              await (b.getLogs as (t: string) => Promise<Array<{ level: string; message: string; timestamp: number }>>)(logType);
+            entries.push(...raw.map((e) => ({
+              level: e.level,
+              message: e.message,
+              timestamp: e.timestamp,
+              timestampISO: new Date(e.timestamp).toISOString(),
+              source: logType,
+            })));
+            succeeded++;
+          } catch (err) {
+            errors.push(`${logType}: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
+      }
+      if (attempted > 0 && succeeded === 0) {
+        throw new Error(`All browser log types failed: ${errors.join('; ')}`);
       }
       return { logTypes: availableTypes, entries };
     }
@@ -133,7 +147,7 @@ export async function readSessionLogs(): Promise<{ mimeType: string; text: strin
 export const sessionLogsResource: ResourceDefinition = {
   name: 'session-current-logs',
   uri: 'wdio://session/current/logs',
-  description: 'Session logs, console errors, and crash reports for the current session. Auto-detects session type — browser: console logs + JS exceptions via getLogs(\'browser\'); Android: system/crash logs via getLogs(\'logcat\'); iOS: crash/panic + system logs via getLogs(\'crashlog\') and getLogs(\'syslog\'). NOTE: Reading this resource clears the log buffer per protocol spec — subsequent reads return only entries accumulated since the last read. Browser logs require Chromium (Chrome/Edge).',
+  description: 'Session logs, console errors, network performance events, and crash reports for the current session. Auto-detects session type — browser: console logs + JS exceptions via getLogs(\'browser\') and network/performance events via getLogs(\'performance\'); Android: system/crash logs via getLogs(\'logcat\'); iOS: crash/panic + system logs via getLogs(\'crashlog\') and getLogs(\'syslog\'). NOTE: Reading this resource clears the log buffer per protocol spec — subsequent reads return only entries accumulated since the last read. Browser logs require Chromium (Chrome/Edge).',
   handler: async () => {
     const result = await readSessionLogs();
     return {
