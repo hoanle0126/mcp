@@ -1,6 +1,8 @@
 import type { SessionHistory } from '../types/recording';
 import type { ToolGroup, ToolPlatform } from '../toolsets';
 
+export type NetworkLogsMode = 'none' | 'failures' | 'all';
+
 export interface SessionMetadata {
   type: 'browser' | 'ios' | 'android';
   /** Browser sessions can have a specialised lifecycle while retaining renderer semantics. */
@@ -14,6 +16,7 @@ export interface SessionMetadata {
   tunnelName?: string;
   tunnelHandle?: unknown;
   trace?: boolean;
+  networkLogs?: NetworkLogsMode;
   /** The remote session lifecycle is owned outside this MCP process. */
   externallyManaged?: boolean;
 }

@@ -1,4 +1,5 @@
 import type { SessionProvider, ConnectionConfig } from './types';
+import type { NetworkLogsMode } from '../session/state';
 
 const BIDI_RESPONSE_TIMEOUT_MS = 30_000;
 const HEADLESS_TOKEN = 'HeadlessChrome/';
@@ -9,6 +10,7 @@ export type LocalBrowserOptions = {
   windowWidth?: number;
   windowHeight?: number;
   capabilities?: Record<string, unknown>;
+  networkLogs?: NetworkLogsMode;
 };
 
 export class LocalBrowserProvider implements SessionProvider {
@@ -24,6 +26,7 @@ export class LocalBrowserProvider implements SessionProvider {
     const windowWidth = (options.windowWidth as number | undefined) ?? 1280;
     const windowHeight = (options.windowHeight as number | undefined) ?? 800;
     const userCapabilities = (options.capabilities as Record<string, unknown> | undefined) ?? {};
+    const networkLogs = (options.networkLogs as NetworkLogsMode | undefined) ?? 'none';
 
     const headlessSupported = selectedBrowser !== 'safari';
     const effectiveHeadless = headless && headlessSupported;
@@ -65,12 +68,16 @@ export class LocalBrowserProvider implements SessionProvider {
       case 'chrome':
         capabilities.browserName = 'chrome';
         capabilities['goog:chromeOptions'] = { args: chromiumArgs };
-        capabilities['goog:loggingPrefs'] = { browser: 'ALL', performance: 'ALL' };
+        if (networkLogs !== 'none') {
+          capabilities['goog:loggingPrefs'] = { performance: 'ALL' };
+        }
         break;
       case 'edge':
         capabilities.browserName = 'msedge';
         capabilities['ms:edgeOptions'] = { args: chromiumArgs };
-        capabilities['ms:loggingPrefs'] = { browser: 'ALL', performance: 'ALL' };
+        if (networkLogs !== 'none') {
+          capabilities['ms:loggingPrefs'] = { performance: 'ALL' };
+        }
         break;
       case 'firefox':
         capabilities.browserName = 'firefox';

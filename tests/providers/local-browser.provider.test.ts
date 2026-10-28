@@ -37,9 +37,19 @@ describe('LocalBrowserProvider', () => {
   it.each([
     ['chrome', 'goog:loggingPrefs'],
     ['edge', 'ms:loggingPrefs'],
-  ])('buildCapabilities: %s enables browser and performance loggingPrefs', (browser, prefKey) => {
-    const caps = localBrowserProvider.buildCapabilities({ browser });
-    expect(caps[prefKey]).toEqual({ browser: 'ALL', performance: 'ALL' });
+  ])('buildCapabilities: %s sets no loggingPrefs when networkLogs is none or omitted', (browser, prefKey) => {
+    expect(localBrowserProvider.buildCapabilities({ browser })[prefKey]).toBeUndefined();
+    expect(localBrowserProvider.buildCapabilities({ browser, networkLogs: 'none' })[prefKey]).toBeUndefined();
+  });
+
+  it.each([
+    ['chrome', 'goog:loggingPrefs', 'failures'],
+    ['chrome', 'goog:loggingPrefs', 'all'],
+    ['edge', 'ms:loggingPrefs', 'failures'],
+    ['edge', 'ms:loggingPrefs', 'all'],
+  ] as const)('buildCapabilities: %s enables only performance loggingPrefs when networkLogs is %s', (browser, prefKey, networkLogs) => {
+    const caps = localBrowserProvider.buildCapabilities({ browser, networkLogs });
+    expect(caps[prefKey]).toEqual({ performance: 'ALL' });
   });
 
   it('getSessionType returns browser', () => {
