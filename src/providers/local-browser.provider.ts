@@ -20,13 +20,13 @@ export class LocalBrowserProvider implements SessionProvider {
     return { bidiResponseTimeout: BIDI_RESPONSE_TIMEOUT_MS };
   }
 
-  buildCapabilities(options: Record<string, unknown>): Record<string, unknown> {
-    const selectedBrowser = (options.browser as string | undefined) ?? 'chrome';
-    const headless = (options.headless as boolean | undefined) ?? true;
-    const windowWidth = (options.windowWidth as number | undefined) ?? 1280;
-    const windowHeight = (options.windowHeight as number | undefined) ?? 800;
-    const userCapabilities = (options.capabilities as Record<string, unknown> | undefined) ?? {};
-    const networkLogs = (options.networkLogs as NetworkLogsMode | undefined) ?? 'none';
+  buildCapabilities(options: LocalBrowserOptions): Record<string, unknown> {
+    const selectedBrowser = options.browser ?? 'chrome';
+    const headless = options.headless ?? true;
+    const windowWidth = options.windowWidth ?? 1280;
+    const windowHeight = options.windowHeight ?? 800;
+    const userCapabilities = options.capabilities ?? {};
+    const networkLogs = options.networkLogs ?? 'none';
 
     const headlessSupported = selectedBrowser !== 'safari';
     const effectiveHeadless = headless && headlessSupported;

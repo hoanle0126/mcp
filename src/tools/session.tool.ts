@@ -339,6 +339,11 @@ async function startBrowserSession(args: StartSessionArgs, defaultNetworkLogs: N
   const headlessNote = headless && !headlessSupported
     ? '\nNote: Safari does not support headless mode. Started in headed mode.'
     : '';
+  const effectiveProvider = args.provider ?? 'local';
+  const networkLogsSupported = effectiveProvider === 'local' && (browser === 'chrome' || browser === 'edge');
+  const networkLogsNote = networkLogs !== 'none' && !networkLogsSupported
+    ? '\nNote: networkLogs is only supported for local Chrome and Edge sessions and has no effect for this session.'
+    : '';
   const reportNote = provider.getStartNote?.(wdioBrowser) ?? '';
   const startMessage = args.provider === 'external'
     ? [
@@ -346,9 +351,10 @@ async function startBrowserSession(args: StartSessionArgs, defaultNetworkLogs: N
       `Endpoint: ${connectionConfig.protocol ?? 'http'}://${connectionConfig.hostname ?? '127.0.0.1'}:${connectionConfig.port ?? 4445}${connectionConfig.path ?? '/'}`,
       `Capabilities: ${JSON.stringify(mergedCapabilities)}`,
       sizeNote.trim(),
+      networkLogsNote.trim(),
       reportNote.trim(),
     ].filter(Boolean).join('\n')
-    : `${browserDisplayNames[browser]} browser started in ${modeText} mode with sessionId: ${sessionId} (${windowWidth}x${windowHeight})${urlText}${headlessNote}${sizeNote}${userAgentNote}${reportNote}`;
+    : `${browserDisplayNames[browser]} browser started in ${modeText} mode with sessionId: ${sessionId} (${windowWidth}x${windowHeight})${urlText}${headlessNote}${sizeNote}${userAgentNote}${networkLogsNote}${reportNote}`;
 
   const text = page ? `${startMessage}\n${page}` : startMessage;
 
@@ -649,11 +655,15 @@ async function attachBrowserSession(args: StartSessionArgs): Promise<CallToolRes
 }
 
 export function parseNetworkLogsMode(value: string | undefined): NetworkLogsMode {
-  return value === 'failures' || value === 'all' ? value : 'none';
+  if (value === undefined || value.trim() === '') return 'none';
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'none' || normalized === 'failures' || normalized === 'all') {
+    return normalized;
+  }
+  throw new Error(`Invalid WDIO_MCP_NETWORK_LOGS value "${value}". Accepted values: none, failures, all.`);
 }
 
-export function createStartSessionTool(defaultNetworkLogs: string | undefined = 'none'): ToolCallback {
-  const resolvedDefault = parseNetworkLogsMode(defaultNetworkLogs);
+export function createStartSessionTool(defaultNetworkLogs: NetworkLogsMode = 'none'): ToolCallback {
   return async (args: StartSessionArgs): Promise<CallToolResult> => {
     try {
       if (args.provider === 'external' && args.platform !== 'browser') {
@@ -668,7 +678,7 @@ export function createStartSessionTool(defaultNetworkLogs: string | undefined = 
         if (args.attach) {
           return await attachBrowserSession(args);
         }
-        return await startBrowserSession(args, resolvedDefault);
+        return await startBrowserSession(args, defaultNetworkLogs);
       }
       return await startMobileSession(args);
     } catch (e) {

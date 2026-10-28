@@ -6,7 +6,7 @@ describe('LocalBrowserProvider', () => {
     expect(localBrowserProvider.getConnectionConfig({})).toEqual({ bidiResponseTimeout: 30_000 });
   });
 
-  it.each(['chrome', 'edge'])('buildCapabilities: %s hides navigator.webdriver', (browser) => {
+  it.each(['chrome', 'edge'] as const)('buildCapabilities: %s hides navigator.webdriver', (browser) => {
     const caps = localBrowserProvider.buildCapabilities({ browser });
     const key = browser === 'chrome' ? 'goog:chromeOptions' : 'ms:edgeOptions';
     expect((caps[key] as any).args).toContain('--disable-blink-features=AutomationControlled');
@@ -37,7 +37,7 @@ describe('LocalBrowserProvider', () => {
   it.each([
     ['chrome', 'goog:loggingPrefs'],
     ['edge', 'ms:loggingPrefs'],
-  ])('buildCapabilities: %s sets no loggingPrefs when networkLogs is none or omitted', (browser, prefKey) => {
+  ] as const)('buildCapabilities: %s sets no loggingPrefs when networkLogs is none or omitted', (browser, prefKey) => {
     expect(localBrowserProvider.buildCapabilities({ browser })[prefKey]).toBeUndefined();
     expect(localBrowserProvider.buildCapabilities({ browser, networkLogs: 'none' })[prefKey]).toBeUndefined();
   });
