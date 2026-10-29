@@ -3,13 +3,18 @@ import { join } from 'node:path';
 import type { SessionHistory } from '../types/recording';
 import type { SessionResult } from '../providers/types';
 import type { SessionMetadata } from './state';
-import { getState, notifySessionRegistered } from './state';
+import { getState, notifySessionsChanged } from './state';
+import { assertNameAvailable, setContextSession } from './routing';
 import { getProvider } from '../providers/registry';
 import { captureTraceScreenshot, endTrace } from '../trace/recorder.js';
 import { deleteTraceSession, getTraceSession } from '../trace/state.js';
 import { buildTraceZip } from '../trace/zip-writer.js';
 import { cleanupSessionRuntime } from '../electron/runtime.js';
 import { releaseSessionMocks } from '../tools/mock.tool.js';
+import { withTimeout } from '../utils/with-timeout';
+
+// A hung driver must not block close_session (it skips the per-session queue and its 90s deadline); state cleanup in the outer finally still runs.
+const DELETE_SESSION_TIMEOUT_MS = 90_000;
 
 async function finalizeTrace(sessionId: string, browser: WebdriverIO.Browser): Promise<void> {
   endTrace(sessionId);
@@ -62,17 +67,21 @@ export function registerSession(
   browser: WebdriverIO.Browser,
   metadata: SessionMetadata,
   historyEntry: SessionHistory,
+  options: { keep?: boolean; name?: string } = {},
 ): void {
   const state = getState();
-  const oldSessionId = state.currentSession;
+  const { keep, name } = options;
+  const oldSessionId = keep ? null : state.currentSession;
+  assertNameAvailable(name, oldSessionId);
+  metadata.name = name ?? metadata.name;
   if (oldSessionId && oldSessionId !== sessionId) {
     handleSessionTransition(sessionId);
   }
   state.browsers.set(sessionId, browser);
   state.sessionMetadata.set(sessionId, metadata);
   state.sessionHistory.set(sessionId, historyEntry);
-  state.currentSession = sessionId;
-  notifySessionRegistered(metadata);
+  if (!keep || !state.currentSession) state.currentSession = sessionId;
+  setContextSession(sessionId);
 
   // If there was a previous session, terminate it to prevent orphaning
   if (oldSessionId && oldSessionId !== sessionId) {
@@ -113,14 +122,28 @@ export function registerSession(
           await provider.stopTunnel?.(oldMetadata.tunnelHandle).catch(() => {});
         }
       };
-      void closeOld();
+      void closeOld().catch((e) => {
+        console.error('[WARN] Failed to close replaced session:', e);
+      });
       state.browsers.delete(oldSessionId);
       state.sessionMetadata.delete(oldSessionId);
     }
   }
+  notifySessionsChanged(metadata);
 }
 
-export async function closeSession(sessionId: string, detach: boolean, isAttached: boolean, force?: boolean): Promise<void> {
+const closing = new Map<string, Promise<void>>();
+
+// close_session bypasses the per-session queue, so overlapping closes must share one teardown.
+export function closeSession(sessionId: string, detach: boolean, isAttached: boolean, force?: boolean, result?: SessionResult): Promise<void> {
+  const inFlight = closing.get(sessionId);
+  if (inFlight) return inFlight;
+  const teardown = closeSessionOnce(sessionId, detach, isAttached, force, result).finally(() => closing.delete(sessionId));
+  closing.set(sessionId, teardown);
+  return teardown;
+}
+
+async function closeSessionOnce(sessionId: string, detach: boolean, isAttached: boolean, force?: boolean, result?: SessionResult): Promise<void> {
   const state = getState();
   const browser = state.browsers.get(sessionId);
   if (!browser) return;
@@ -144,7 +167,7 @@ export async function closeSession(sessionId: string, detach: boolean, isAttache
       if (metadata?.provider) {
         try {
           const provider = getProvider(metadata.provider, metadata.type);
-          await provider.onSessionClose?.(sessionId, metadata.type, getSessionResult(history), metadata.tunnelHandle, browser, metadata.region);
+          await provider.onSessionClose?.(sessionId, metadata.type, result ?? getSessionResult(history), metadata.tunnelHandle, browser, metadata.region);
         } catch (e) {
           console.error('[WARN] Failed to run provider onSessionClose:', e);
         }
@@ -155,7 +178,7 @@ export async function closeSession(sessionId: string, detach: boolean, isAttache
         console.error('[WARN] Failed to clean up session runtime:', e);
       }
       try {
-        await browser.deleteSession();
+        await withTimeout(browser.deleteSession(), DELETE_SESSION_TIMEOUT_MS, () => new Error(`deleteSession did not finish within ${DELETE_SESSION_TIMEOUT_MS / 1000}s`));
       } finally {
         // Stop tunnel AFTER deleteSession so SC doesn't wait for active jobs.
         // If session deletion fails, still best-effort stop the tunnel so the
@@ -181,6 +204,7 @@ export async function closeSession(sessionId: string, detach: boolean, isAttache
     if (state.currentSession === sessionId) {
       state.currentSession = null;
     }
+    notifySessionsChanged();
   }
 }
 

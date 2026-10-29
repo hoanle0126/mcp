@@ -2,6 +2,8 @@ import type { SessionProvider, ConnectionConfig } from './types';
 import type { NetworkLogsMode } from '../session/state';
 
 const BIDI_RESPONSE_TIMEOUT_MS = 30_000;
+// Aborts hung classic commands natively and never replays a timed-out command; longer than the 30s action/BiDi timeouts.
+const CONNECTION_RETRY_TIMEOUT_MS = 45_000;
 const HEADLESS_TOKEN = 'HeadlessChrome/';
 
 export type LocalBrowserOptions = {
@@ -17,7 +19,11 @@ export class LocalBrowserProvider implements SessionProvider {
   name = 'local-browser';
 
   getConnectionConfig(_options: Record<string, unknown>): ConnectionConfig {
-    return { bidiResponseTimeout: BIDI_RESPONSE_TIMEOUT_MS };
+    return {
+      bidiResponseTimeout: BIDI_RESPONSE_TIMEOUT_MS,
+      connectionRetryTimeout: CONNECTION_RETRY_TIMEOUT_MS,
+      connectionRetryCount: 0,
+    };
   }
 
   buildCapabilities(options: LocalBrowserOptions): Record<string, unknown> {

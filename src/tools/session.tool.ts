@@ -6,12 +6,15 @@ import { z } from 'zod';
 import type { NetworkLogsMode, SessionMetadata } from '../session/state';
 import { getBrowser, getState } from '../session/state';
 import { closeSession, registerSession } from '../session/lifecycle';
+import { activeSessionId, assertNameAvailable, resolveSession, runInSessionQueue, sessionLabel } from '../session/routing';
+import { withRecording } from '../recording/step-recorder';
 import { getProvider } from '../providers/registry';
 import { matchHeadedUserAgent } from '../providers/local-browser.provider';
 import { coerceBoolean } from '../utils/zod-helpers';
 import { startTrace, recordInitialNavigation } from '../trace/recorder.js';
-import { getElectronService } from '../electron/runtime.js';
-import { pageReport, agentFor } from '../session/agent';
+import { cleanupSessionRuntime, getElectronService } from '../electron/runtime.js';
+import { SessionError } from '@wdio/session/agent';
+import { pageReport, agentFor, withActionTimeout } from '../session/agent';
 
 const platformEnum = z.enum(['browser', 'electron', 'ios', 'android']);
 const attachPlatformEnum = z.enum(['browser', 'ios', 'android']);
@@ -22,9 +25,12 @@ const uriScheme = z.string().regex(/^[A-Za-z][A-Za-z0-9+.-]*$/, 'Must be a URI s
 
 export const startSessionToolDefinition: ToolDefinition = {
   name: 'start_session',
-  description: 'Starts a browser, Electron app or mobile app session (closes the active one). Browsers run headless at 1280x800 by default; pass navigationUrl to open a page right away. attach: true connects to a running Chrome via CDP.',
+  description: 'Starts a browser, Electron app or mobile app session (closes the active one unless onExisting: "keep"). Browsers run headless at 1280x800 by default; pass navigationUrl to open a page right away. attach: true connects to a running Chrome via CDP.',
   annotations: { title: 'Start Session', destructiveHint: false },
+  sessionless: true,
   inputSchema: {
+    name: z.string().min(1).optional().describe('Name for this session, unique among live sessions. Target it from other tools with session: <name>.'),
+    onExisting: z.enum(['close', 'keep']).optional().default('close').describe('close (default) replaces the active session. keep is an explicit opt-in to run this session alongside the existing ones; the new session is NOT made the default when one exists, so target it with session: <name>.'),
     provider: z.enum(['local', 'browserstack', 'saucelabs', 'testmu', 'testingbot', 'digitalai', 'external']).optional().default('local').describe('Default local. Cloud providers read credentials from env. external: a W3C WebDriver endpoint (webdriverConfig).'),
     platform: platformEnum,
     browser: browserEnum.optional().describe('Required for platform browser'),
@@ -87,12 +93,15 @@ export const startSessionToolDefinition: ToolDefinition = {
 
 export const attachSessionToolDefinition: ToolDefinition = {
   name: 'attach_session',
-  description: 'Attaches to an existing remote WebDriver or Appium session by ID without creating a new session. Only one session can be active at a time. The externally managed session is detached, not terminated, by default on close.',
+  description: 'Attaches to an existing remote WebDriver or Appium session by ID without creating a new session. Closes the active session unless onExisting: "keep". A name registers the session under it; names are scoped to this server process. With only a name (no sessionId), looks up an already live named session. The externally managed session is detached, not terminated, by default on close.',
   annotations: { title: 'Attach Session', destructiveHint: false },
+  sessionless: true,
   inputSchema: {
-    sessionId: z.string().min(1).describe('Existing remote WebDriver/Appium session ID'),
+    sessionId: z.string().min(1).optional().describe('Existing remote WebDriver/Appium session ID. Required unless only looking up a live session by name.'),
+    name: z.string().min(1).optional().describe('Name to register the attached session under, unique among live sessions, or, without sessionId, the name of a live session to look up. Names are scoped to this server process.'),
+    onExisting: z.enum(['close', 'keep']).optional().default('close').describe('close (default) replaces the active session. keep is an explicit opt-in to run this session alongside the existing ones; the new session is NOT made the default when one exists, so target it with session: <name>.'),
     provider: z.enum(['local', 'browserstack', 'saucelabs', 'testmu', 'testingbot', 'digitalai', 'external']).optional().default('local').describe('Provider hosting the existing session (default: local). Use "external" for a custom W3C WebDriver endpoint.'),
-    platform: attachPlatformEnum.describe('Existing session platform type (browser, ios, or android; Electron attachment is unsupported).'),
+    platform: attachPlatformEnum.optional().describe('Existing session platform type (browser, ios, or android; Electron attachment is unsupported). Required with sessionId.'),
     browser: browserEnum.optional().describe('Browser for local command registration (browser platform only, default: chrome)'),
     automationName: automationEnum.optional().describe('Appium automation driver for local command registration (mobile platforms only)'),
     webdriverConfig: z.object({
@@ -114,6 +123,8 @@ export const attachSessionToolDefinition: ToolDefinition = {
 };
 
 type StartSessionArgs = {
+  name?: string;
+  onExisting?: 'close' | 'keep';
   provider?: 'local' | 'browserstack' | 'saucelabs' | 'testmu' | 'testingbot' | 'digitalai' | 'external';
   platform: 'browser' | 'electron' | 'ios' | 'android';
   browser?: 'chrome' | 'firefox' | 'edge' | 'safari';
@@ -157,9 +168,11 @@ type StartSessionArgs = {
 };
 
 type AttachSessionArgs = {
-  sessionId: string;
+  sessionId?: string;
+  name?: string;
+  onExisting?: 'close' | 'keep';
   provider?: 'local' | 'browserstack' | 'saucelabs' | 'testmu' | 'testingbot' | 'digitalai' | 'external';
-  platform: 'browser' | 'ios' | 'android';
+  platform?: 'browser' | 'ios' | 'android';
   browser?: 'chrome' | 'firefox' | 'edge' | 'safari';
   automationName?: 'XCUITest' | 'UiAutomator2';
   webdriverConfig?: { protocol?: string; hostname?: string; port?: number; path?: string };
@@ -173,10 +186,49 @@ export const closeSessionToolDefinition: ToolDefinition = {
   name: 'close_session',
   description: 'Closes the session, or with detach: true disconnects and leaves it running. Attached sessions and Appium sessions with noReset are detached unless detach: false.',
   annotations: { title: 'Close Session', destructiveHint: true },
+  unqueued: true,
   inputSchema: {
     detach: coerceBoolean.optional(),
   },
 };
+
+function replacedSessionId({ onExisting }: { onExisting?: 'close' | 'keep' }): string | undefined {
+  return onExisting === 'keep' ? undefined : getState().currentSession ?? undefined;
+}
+
+// startup joins the session queue synchronously with registration, so no targeted call can run before it
+async function registerOrDispose<T>(
+  sessionId: string,
+  register: () => void,
+  disposers: Array<() => Promise<unknown>>,
+  startup?: () => Promise<T>,
+): Promise<T | undefined> {
+  try {
+    register();
+  } catch (e) {
+    for (const dispose of disposers) {
+      try {
+        await dispose();
+      } catch (disposeError) {
+        console.error('[WARN] Failed to dispose new session:', disposeError);
+      }
+    }
+    throw e;
+  }
+  if (!startup) return undefined;
+  return runInSessionQueue(sessionId, async () => {
+    try {
+      return await startup();
+    } catch (e) {
+      try {
+        await closeSession(sessionId, false, Boolean(getState().sessionMetadata.get(sessionId)?.isAttached), false, { status: 'failed', reason: e instanceof Error ? e.message : String(e) });
+      } catch (closeError) {
+        console.error('[WARN] Failed to close session after failed startup:', closeError);
+      }
+      throw e;
+    }
+  });
+}
 
 type TabSnapshot = { activeTabUrl: string | undefined; allTabUrls: string[] };
 
@@ -304,38 +356,47 @@ async function startBrowserSession(args: StartSessionArgs, defaultNetworkLogs: N
     networkLogs,
   };
 
-  registerSession(sessionId, wdioBrowser, sessionMetadata, {
+  const { sizeNote, page, navigationTimedOut } = (await registerOrDispose(sessionId, () => registerSession(sessionId, wdioBrowser, sessionMetadata, {
     sessionId,
     type: 'browser',
     startedAt: new Date().toISOString(),
     capabilities: mergedCapabilities,
     steps: [],
-  });
-
-  if (args.trace) {
-    startTrace(sessionId, mergedCapabilities, 'browser', { width: windowWidth, height: windowHeight });
-  }
-
-  let sizeNote = '';
-  try {
-    await wdioBrowser.setWindowSize(windowWidth, windowHeight);
-  } catch (e) {
-    sizeNote = `\nNote: Unable to set window size (${windowWidth}x${windowHeight}). ${e}`;
-  }
-
-  // set up before the first page loads, so it records that page too
-  const agent = await agentFor();
-  let page = '';
-  if (navigationUrl) {
-    await wdioBrowser.url(navigationUrl);
+  }, { keep: args.onExisting === 'keep', name: args.name }), [
+    () => wdioBrowser.deleteSession(),
+    async () => { if (tunnelHandle) await provider.stopTunnel?.(tunnelHandle); },
+  ], async () => {
     if (args.trace) {
-      await recordInitialNavigation(sessionId, navigationUrl);
+      startTrace(sessionId, mergedCapabilities, 'browser', { width: windowWidth, height: windowHeight });
     }
-    page = agent ? await pageReport(agent) : '';
-  }
+
+    let sizeNote = '';
+    try {
+      await wdioBrowser.setWindowSize(windowWidth, windowHeight);
+    } catch (e) {
+      sizeNote = `\nNote: Unable to set window size (${windowWidth}x${windowHeight}). ${e}`;
+    }
+
+    // set up before the first page loads, so it records that page too
+    const agent = await agentFor();
+    let page = '';
+    if (navigationUrl) {
+      try {
+        await withActionTimeout(wdioBrowser.url(navigationUrl), 'navigate');
+      } catch (e) {
+        if (!(e instanceof SessionError && e.code === 'TIMEOUT')) throw e;
+        return { sizeNote, page: [e.message, e.hint].filter(Boolean).join('\n'), navigationTimedOut: true };
+      }
+      if (args.trace) {
+        await recordInitialNavigation(sessionId, navigationUrl);
+      }
+      page = agent ? await pageReport(agent) : '';
+    }
+    return { sizeNote, page, navigationTimedOut: false };
+  }))!;
 
   const modeText = effectiveHeadless ? 'headless' : 'headed';
-  const urlText = navigationUrl ? ` and navigated to ${navigationUrl}` : '';
+  const urlText = !navigationUrl ? '' : navigationTimedOut ? ` and started loading ${navigationUrl}` : ` and navigated to ${navigationUrl}`;
   const headlessNote = headless && !headlessSupported
     ? '\nNote: Safari does not support headless mode. Started in headed mode.'
     : '';
@@ -392,10 +453,11 @@ async function startElectronSession(args: StartSessionArgs): Promise<CallToolRes
   // A replacement Electron app must be fully torn down before the service starts
   // another app because the standalone service tracks launcher state by browser.
   const state = getState();
-  if (state.currentSession) {
+  if (args.onExisting !== 'keep' && state.currentSession) {
     const oldMetadata = state.sessionMetadata.get(state.currentSession);
     if (oldMetadata?.runtime === 'electron') {
-      await closeSession(state.currentSession, false, Boolean(oldMetadata.isAttached), true);
+      const oldId = state.currentSession;
+      await closeSession(oldId, false, Boolean(oldMetadata.isAttached), true);
     }
   }
 
@@ -417,9 +479,12 @@ async function startElectronSession(args: StartSessionArgs): Promise<CallToolRes
     provider: 'local', trace: args.trace ?? false,
     ...(args.electronDeeplinkScheme ? { electronDeeplinkScheme: args.electronDeeplinkScheme } : {}),
   };
-  registerSession(sessionId, browser, metadata, {
+  await registerOrDispose(sessionId, () => registerSession(sessionId, browser, metadata, {
     sessionId, type: 'browser', runtime: 'electron', startedAt: new Date().toISOString(), capabilities: recordedCapabilities, steps: [],
-  });
+  }, { keep: args.onExisting === 'keep', name: args.name }), [
+    () => cleanupSessionRuntime('electron', browser),
+    () => browser.deleteSession(),
+  ]);
   if (args.trace) startTrace(sessionId, recordedCapabilities, 'browser', { width: args.windowWidth ?? 1280, height: args.windowHeight ?? 800 });
 
   return { content: [{ type: 'text', text: [
@@ -476,14 +541,17 @@ async function startMobileSession(args: StartSessionArgs): Promise<CallToolResul
     trace: args.trace ?? false,
   };
 
-  registerSession(sessionId, browser, metadata, {
+  await registerOrDispose(sessionId, () => registerSession(sessionId, browser, metadata, {
     sessionId,
     type: sessionType,
     startedAt: new Date().toISOString(),
     capabilities: mergedCapabilities,
     appiumConfig: { hostname: serverConfig.hostname, port: serverConfig.port, path: serverConfig.path },
     steps: [],
-  });
+  }, { keep: args.onExisting === 'keep', name: args.name }), [
+    () => browser.deleteSession(),
+    async () => { if (tunnelHandle) await provider.stopTunnel?.(tunnelHandle); },
+  ]);
 
   if (args.trace) {
     startTrace(sessionId, mergedCapabilities, sessionType);
@@ -511,7 +579,7 @@ async function startMobileSession(args: StartSessionArgs): Promise<CallToolResul
   };
 }
 
-async function attachExistingSession(args: AttachSessionArgs): Promise<CallToolResult> {
+async function attachExistingSession(args: AttachSessionArgs & { sessionId: string; platform: 'browser' | 'ios' | 'android' }): Promise<CallToolResult> {
   const { sessionId, platform } = args;
 
   const providerName = args.provider ?? 'local';
@@ -545,6 +613,7 @@ async function attachExistingSession(args: AttachSessionArgs): Promise<CallToolR
     trace: args.trace ?? false,
   };
 
+  // externally managed: a failed registration must not delete someone else's session
   registerSession(sessionId, browser, metadata, {
     sessionId,
     type: sessionType,
@@ -558,7 +627,7 @@ async function attachExistingSession(args: AttachSessionArgs): Promise<CallToolR
       },
     }),
     steps: [],
-  });
+  }, { keep: args.onExisting === 'keep', name: args.name });
 
   if (args.trace) {
     const viewport = platform === 'browser'
@@ -619,13 +688,14 @@ async function attachBrowserSession(args: StartSessionArgs): Promise<CallToolRes
     trace: args.trace ?? false,
   };
 
+  // attached to a running Chrome: a failed registration must not close the user's browser
   registerSession(sessionId, browser, sessionMetadata, {
     sessionId,
     type: 'browser',
     startedAt: new Date().toISOString(),
     capabilities,
     steps: [],
-  });
+  }, { keep: args.onExisting === 'keep', name: args.name });
 
   if (args.trace) {
     startTrace(sessionId, capabilities, 'browser', { width: 1920, height: 1080 });
@@ -673,6 +743,8 @@ export function createStartSessionTool(defaultNetworkLogs: NetworkLogsMode = 'no
         };
       }
 
+      assertNameAvailable(args.name, replacedSessionId(args));
+
       if (args.platform === 'electron') return await startElectronSession(args);
       if (args.platform === 'browser') {
         if (args.attach) {
@@ -691,7 +763,15 @@ export const startSessionTool: ToolCallback = createStartSessionTool();
 
 export const attachSessionTool: ToolCallback = async (args: AttachSessionArgs): Promise<CallToolResult> => {
   try {
-    return await attachExistingSession(args);
+    const { sessionId, platform, name } = args;
+    if (!sessionId) {
+      if (!name) return { isError: true, content: [{ type: 'text', text: 'Error attaching to session: provide sessionId, or name of a live session.' }] };
+      const id = resolveSession(name);
+      return { content: [{ type: 'text', text: `Session ${sessionLabel(id)} is live. Target it with session: "${name}".` }] };
+    }
+    if (!platform) return { isError: true, content: [{ type: 'text', text: 'Error attaching to session: platform is required with sessionId.' }] };
+    assertNameAvailable(name, replacedSessionId(args));
+    return await attachExistingSession({ ...args, sessionId, platform });
   } catch (e) {
     return { isError: true, content: [{ type: 'text', text: `Error attaching to session: ${e}` }] };
   }
@@ -701,7 +781,7 @@ export const closeSessionTool: ToolCallback = async (args: { detach?: boolean } 
   try {
     getBrowser();
     const state = getState();
-    const sessionId = state.currentSession;
+    const sessionId = activeSessionId() as string;
     const metadata = state.sessionMetadata.get(sessionId);
 
     const isAttached = !!metadata?.isAttached;
@@ -729,3 +809,8 @@ export const closeSessionTool: ToolCallback = async (args: { detach?: boolean } 
     return { isError: true, content: [{ type: 'text', text: `Error closing session: ${e}` }] };
   }
 };
+
+// Name-only lookup creates no session, so it must not append a step to the default session's history.
+const recordedAttachSession = withRecording('attach_session', attachSessionTool);
+export const attachSessionRecorded: ToolCallback = ((args: AttachSessionArgs, extra: unknown) =>
+  args.sessionId ? recordedAttachSession(args as never, extra as never) : attachSessionTool(args as never, extra as never)) as unknown as ToolCallback;

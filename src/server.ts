@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { z } from 'zod';
 import pkg from '../package.json' with { type: 'json' };
 import http from 'node:http';
 import type { RegisteredTool, ToolCallback } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -7,6 +8,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { parseArgs } from './utils/parse-args';
 import { extractHost, sendJsonRpcError } from './utils/http-helpers';
+import { installCrashHandlers } from './utils/crash-handlers';
 import type { ToolDefinition } from './types/tool';
 import type { ResourceDefinition } from './types/resource';
 import { navigateTool, navigateToolDefinition } from './tools/navigate.tool';
@@ -69,7 +71,7 @@ import {
   tabsResource,
 } from './resources';
 import {
-  attachSessionTool,
+  attachSessionRecorded,
   attachSessionToolDefinition,
   closeSessionTool,
   closeSessionToolDefinition,
@@ -93,6 +95,7 @@ import { openWebExtensionTool, openWebExtensionToolDefinition } from './tools/we
 import { executeElectronScriptTool, executeElectronScriptToolDefinition } from './tools/electron-execute.tool';
 import { mockTool, mockToolDefinition, getMockCallsTool, getMockCallsToolDefinition, manageMockTool, manageMockToolDefinition } from './tools/mock.tool';
 import { triggerElectronDeeplinkTool, triggerElectronDeeplinkToolDefinition } from './tools/electron-deeplink.tool';
+import { withSessionTarget, withSessionlessContext } from './session/routing';
 
 console.log = (...args) => console.error('[LOG]', ...args);
 console.info = (...args) => console.error('[INFO]', ...args);
@@ -100,6 +103,7 @@ console.warn = (...args) => console.error('[WARN]', ...args);
 console.debug = (...args) => console.error('[DEBUG]', ...args);
 
 const defaultNetworkLogs = parseNetworkLogsMode(process.env.WDIO_MCP_NETWORK_LOGS);
+const SESSION_TARGET_SCHEMA = z.string().optional().describe('Target session: map name or sessionId. Omit to use the default session.');
 
 function createServer(): McpServer {
   const server = new McpServer({
@@ -124,11 +128,12 @@ function createServer(): McpServer {
 
   const tools = new Map<string, RegisteredTool>();
   const registerTool = (definition: ToolDefinition, callback: ToolCallback) => {
+    const routed = !definition.sessionless;
     const tool = server.registerTool(definition.name, {
       description: definition.description,
-      inputSchema: definition.inputSchema,
+      inputSchema: routed ? { ...definition.inputSchema, session: SESSION_TARGET_SCHEMA } : definition.inputSchema,
       ...(definition.annotations && { annotations: definition.annotations }),
-    }, callback);
+    }, routed ? withSessionTarget(definition.name, callback, definition.unqueued) : withSessionlessContext(callback));
     tools.set(definition.name, tool);
     return tool;
   };
@@ -155,7 +160,7 @@ function createServer(): McpServer {
     withTrace(name, withRecording(name, cb));
 
   registerTool(startSessionToolDefinition, withRecording('start_session', createStartSessionTool(defaultNetworkLogs)));
-  registerTool(attachSessionToolDefinition, withRecording('attach_session', attachSessionTool));
+  registerTool(attachSessionToolDefinition, attachSessionRecorded);
   registerTool(closeSessionToolDefinition, closeSessionTool);
   registerTool(launchChromeToolDefinition, instrument('launch_chrome', launchChromeTool));
   registerTool(emulateDeviceToolDefinition, emulateDeviceTool);
@@ -238,7 +243,8 @@ function createServer(): McpServer {
 }
 
 async function main() {
-  let args: { http: boolean; port: number; allowedHosts: string[]; allowedOrigins: string[] };
+  installCrashHandlers(process, console.error);
+  let args:{ http: boolean; port: number; allowedHosts: string[]; allowedOrigins: string[] };
   try {
     args = parseArgs(process.argv.slice(2));
   } catch (e) {
@@ -317,6 +323,9 @@ async function main() {
       console.error(`WebdriverIO MCP Server running on Streamable HTTP at http://localhost:${args.port}/mcp`);
       console.error(`  allowed hosts:   ${args.allowedHosts.join(', ')}`);
       console.error(`  allowed origins: ${originsMsg}`);
+    }).on('error', (error) => {
+      console.error('Fatal error starting HTTP server:', error);
+      process.exit(1);
     });
 
   } else {
