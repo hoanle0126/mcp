@@ -1,3 +1,4 @@
+import { activeSessionId } from './context';
 import type { SessionHistory } from '../types/recording';
 import type { ToolGroup, ToolPlatform } from '../toolsets';
 
@@ -16,6 +17,7 @@ export interface SessionMetadata {
   trace?: boolean;
   /** The remote session lifecycle is owned outside this MCP process. */
   externallyManaged?: boolean;
+  name?: string;
 }
 
 const state = {
@@ -26,24 +28,24 @@ const state = {
 };
 
 export function getBrowser(): WebdriverIO.Browser {
-  const browser = state.browsers.get(state.currentSession);
+  const browser = state.browsers.get(activeSessionId());
   if (!browser) {
     throw new Error('No active browser session');
   }
   return browser;
 }
 
-type SessionListener = (metadata: SessionMetadata) => void;
+type SessionListener = (registered?: SessionMetadata) => void;
 const sessionListeners = new Set<SessionListener>();
 
-/** Called whenever a session becomes the active one, e.g. to show the tools for its platform. */
-export function onSessionRegistered(listener: SessionListener): () => void {
+/** Called whenever sessions are registered or closed. `registered` is set only on registration. */
+export function onSessionsChanged(listener: SessionListener): () => void {
   sessionListeners.add(listener);
   return () => sessionListeners.delete(listener);
 }
 
-export function notifySessionRegistered(metadata: SessionMetadata): void {
-  for (const listener of sessionListeners) listener(metadata);
+export function notifySessionsChanged(registered?: SessionMetadata): void {
+  for (const listener of sessionListeners) listener(registered);
 }
 
 export interface ToolSettings {
@@ -60,8 +62,9 @@ export function platformOf(metadata: SessionMetadata): ToolPlatform {
 
 /** the platform falls back to the active session when no registration was seen yet */
 export function getToolSettings(): ToolSettings {
-  if (toolSettings.platform === undefined && state.currentSession) {
-    const metadata = state.sessionMetadata.get(state.currentSession);
+  const activeId = activeSessionId();
+  if (toolSettings.platform === undefined && activeId) {
+    const metadata = state.sessionMetadata.get(activeId);
     if (metadata) toolSettings.platform = platformOf(metadata);
   }
   return toolSettings;

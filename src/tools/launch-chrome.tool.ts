@@ -14,6 +14,7 @@ export const launchChromeToolDefinition: ToolDefinition = {
   name: 'launch_chrome',
   description: 'Launches Chrome with remote debugging enabled. Wipes and recreates a temporary profile directory on each call. Mode "newInstance" (default) runs alongside existing Chrome; "freshSession" starts with an empty profile. Set copyProfileFiles to copy cookies/logins from your Default profile — changes do not sync back. After launch, call start_session with attach: true to connect. Spawns a detached Chrome process that persists if the server exits.',
   annotations: { title: 'Launch Chrome', destructiveHint: false },
+  sessionless: true,
   inputSchema: {
     port: z.number().default(9222).describe('Remote debugging port (default: 9222)'),
     mode: z.enum(['newInstance', 'freshSession']).default('newInstance').describe(
@@ -77,7 +78,9 @@ function launchChrome(port: number): void {
     '--profile-directory=Default',
     '--no-first-run',
     '--disable-session-crashed-bubble',
-  ], { detached: true, stdio: 'ignore' }).unref();
+  ], { detached: true, stdio: 'ignore' })
+    .on('error', (error) => console.error('[WARN] Failed to launch Chrome:', error))
+    .unref();
 }
 
 async function waitForCDP(port: number, timeoutMs = 15000): Promise<void> {

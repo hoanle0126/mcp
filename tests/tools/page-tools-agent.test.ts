@@ -111,3 +111,56 @@ describe('press repeat', () => {
     expect(run).toHaveBeenCalledWith('press', { keys: 'Tab', times: 3 });
   });
 });
+
+describe('perform_actions time budget', () => {
+  it('stops before a step that could outlast the session queue deadline', async () => {
+    vi.useFakeTimers();
+    try {
+      run.mockImplementation(async () => {
+        vi.advanceTimersByTime(30_000);
+        return { text: 'ok' };
+      });
+      const result = await call(performActionsTool, { actions: Array.from({ length: 5 }, (_, i) => ({ action: 'click', selector: `e${i}` })) });
+      expect(run).toHaveBeenCalledTimes(2);
+      expect(result.isError).toBeUndefined();
+      expect(result.content[0].text).toContain('3 later actions skipped: this call reached its 90s limit');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('counts the wait for the agent toward the deadline', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.mocked(agentFor).mockImplementationOnce(async () => {
+        vi.advanceTimersByTime(40_000);
+        return agent as never;
+      });
+      run.mockImplementation(async () => {
+        vi.advanceTimersByTime(30_000);
+        return { text: 'ok' };
+      });
+      const result = await call(performActionsTool, { actions: Array.from({ length: 3 }, (_, i) => ({ action: 'click', selector: `e${i}` })) });
+      expect(run).toHaveBeenCalledTimes(1);
+      expect(result.content[0].text).toContain('2 later actions skipped: this call reached its 90s limit');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('runs no step when the agent took the whole budget', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.mocked(agentFor).mockImplementationOnce(async () => {
+        vi.advanceTimersByTime(60_000);
+        return agent as never;
+      });
+      const result = await call(performActionsTool, { actions: [{ action: 'click', selector: 'e1' }] });
+      expect(run).not.toHaveBeenCalled();
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('no step ran');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

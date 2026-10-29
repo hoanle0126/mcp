@@ -3,7 +3,8 @@ import type { ToolCallback } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import type { ToolDefinition } from '../types/tool';
 import type { AgentActionName, AgentSession } from '@wdio/session/agent';
-import { runAction, runActionWithChanges, agentFor, noSession, APP_CHANGES_HINT } from '../session/agent';
+import { runAction, runActionWithChanges, agentFor, noSession, APP_CHANGES_HINT, ACTION_TIMEOUT_MS } from '../session/agent';
+import { QUEUED_CALL_TIMEOUT_MS } from '../session/routing';
 
 export const selectOptionToolDefinition: ToolDefinition = {
   name: 'select_option',
@@ -62,12 +63,17 @@ export const performActionsToolDefinition: ToolDefinition = {
 };
 
 export const performActionsTool: ToolCallback = async ({ actions }: { actions: { action: StepAction; selector?: string; value?: string; times?: number }[] }) => {
+  const startedAt = Date.now();
+  const outOfTime = () => Date.now() - startedAt + ACTION_TIMEOUT_MS >= QUEUED_CALL_TIMEOUT_MS;
   const agent = await agentFor();
   if (!agent) return noSession();
   const supported = new Set(agent.actions.map((s) => s.name));
   const unsupported = [...new Set(actions.map((s) => s.action))].filter((a) => !supported.has(a));
   if (unsupported.length) {
     return { isError: true, content: [{ type: 'text', text: `${unsupported.map((a) => `"${a}"`).join(', ')} not supported in this session, so no step ran. Steps available here: ${Object.keys(STEP_ACTIONS).filter((a) => supported.has(a)).join(', ')}.` }] } as CallToolResult;
+  }
+  if (outOfTime()) {
+    return { isError: true, content: [{ type: 'text', text: `The session took too long to get ready, so no step ran within this call's ${QUEUED_CALL_TIMEOUT_MS / 1000}s limit. Call again.` }] } as CallToolResult;
   }
   const appHint = agent.session.isWeb ? [] : [APP_CHANGES_HINT];
   const out: string[] = [];
@@ -86,7 +92,10 @@ export const performActionsTool: ToolCallback = async ({ actions }: { actions: {
       ? `a new page loaded${changes.url ? ` (${changes.url})` : ''}. Continue with the new refs.`
       : actions[i + 1].action === 'press' && step.action !== 'fill' && step.action !== 'press' && (changes?.kind === 'changed' || changes?.kind === 'removed')
         ? 'the page changed before a key press, so focus may not be where you expected. Check it (or click the element), then continue.'
-        : undefined;
+        // A step that could run past the session queue's deadline would keep acting after the caller got a timeout.
+        : outOfTime()
+          ? `this call reached its ${QUEUED_CALL_TIMEOUT_MS / 1000}s limit. Continue with the remaining actions in a new call.`
+          : undefined;
     if (stopReason) {
       out.push(`${skippedText}: ${stopReason}`);
       break;

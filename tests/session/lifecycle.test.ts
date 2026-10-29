@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import type { SessionMetadata } from '../../src/session/state';
 import { getState } from '../../src/session/state';
 import { closeSession, registerSession } from '../../src/session/lifecycle';
+import { runInSessionQueue } from '../../src/session/routing';
 import type { SessionHistory } from '../../src/types/recording';
 import type { SessionResult } from '../../src/providers/types';
 import { createTraceSession, getTraceSession } from '../../src/trace/state';
@@ -59,6 +60,34 @@ beforeEach(() => {
 });
 
 describe('registerSession', () => {
+  const hist = (id: string): SessionHistory => ({ sessionId: id, type: 'browser', startedAt: new Date().toISOString(), capabilities: {}, steps: [] });
+  const meta = (): SessionMetadata => ({ type: 'browser', capabilities: {}, isAttached: false });
+
+  it('keep leaves the old session alive and the default unchanged', () => {
+    const b1 = makeBrowser();
+    const b2 = makeBrowser();
+    registerSession('s1', b1, meta(), hist('s1'));
+    registerSession('s2', b2, meta(), hist('s2'), { keep: true, name: 'b' });
+    const state = getState();
+    expect(state.currentSession).toBe('s1');
+    expect(state.browsers.get('s1')).toBe(b1);
+    expect(state.browsers.get('s2')).toBe(b2);
+    expect(state.sessionMetadata.get('s2')?.name).toBe('b');
+    expect(b1.deleteSession).not.toHaveBeenCalled();
+    expect(state.sessionHistory.get('s1')?.steps).toHaveLength(0);
+  });
+
+  it('keep becomes the default when none exists', () => {
+    registerSession('s1', makeBrowser(), meta(), hist('s1'), { keep: true });
+    expect(getState().currentSession).toBe('s1');
+  });
+
+  it('throws on a duplicate live session name', () => {
+    registerSession('s1', makeBrowser(), meta(), hist('s1'), { name: 'a' });
+    expect(() => registerSession('s2', makeBrowser(), meta(), hist('s2'), { keep: true, name: 'a' }))
+      .toThrow('Session name "a" is already in use');
+  });
+
   it('sets currentSession', () => {
     const browser = makeBrowser();
     const meta: SessionMetadata = { type: 'browser', capabilities: {}, isAttached: false };
@@ -110,6 +139,22 @@ describe('registerSession', () => {
 
     await vi.waitFor(() => expect(mockStopTunnel).toHaveBeenCalledWith(tunnel));
     expect(getState().currentSession).toBe('s2');
+  });
+
+  it('tears down a replaced session promptly even when a queued command on it is hung', async () => {
+    const state = getState();
+    const oldBrowser = makeBrowser();
+    state.browsers.set('s1', oldBrowser);
+    state.sessionMetadata.set('s1', { type: 'browser', capabilities: {}, isAttached: false });
+    state.sessionHistory.set('s1', { sessionId: 's1', type: 'browser', startedAt: new Date().toISOString(), capabilities: {}, steps: [] });
+    state.currentSession = 's1';
+    void runInSessionQueue('s1', () => new Promise<never>(() => {}));
+
+    registerSession('s2', makeBrowser(), { type: 'browser', capabilities: {}, isAttached: false }, {
+      sessionId: 's2', type: 'browser', startedAt: new Date().toISOString(), capabilities: {}, steps: [],
+    });
+
+    await vi.waitFor(() => expect(oldBrowser.deleteSession).toHaveBeenCalledOnce());
   });
 
   it('does not delete an auto-detached previous session during session transition', async () => {
@@ -317,6 +362,28 @@ describe('closeSession', () => {
     expect(state.currentSession).toBeNull();
   });
 
+  it('rejects and removes the session when deleteSession hangs past 90s', async () => {
+    vi.useFakeTimers();
+    try {
+      const browser = makeBrowser({ deleteSession: vi.fn(() => new Promise<void>(() => {})) });
+      const state = getState();
+      state.browsers.set('hung-delete', browser);
+      state.sessionMetadata.set('hung-delete', { type: 'browser', capabilities: {}, isAttached: false });
+      state.sessionHistory.set('hung-delete', { sessionId: 'hung-delete', type: 'browser', startedAt: new Date().toISOString(), capabilities: {}, steps: [] });
+      state.currentSession = 'hung-delete';
+
+      const closed = closeSession('hung-delete', false, false);
+      const assertion = expect(closed).rejects.toThrow(/did not finish within 90s/);
+      await vi.advanceTimersByTimeAsync(90_000);
+      await assertion;
+
+      expect(state.browsers.has('hung-delete')).toBe(false);
+      expect(state.sessionMetadata.has('hung-delete')).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('continues Electron teardown when runtime cleanup fails', async () => {
     const browser = makeBrowser();
     const tunnel = makeTunnel();
@@ -442,5 +509,19 @@ describe('registerSession orphaned trace cleanup', () => {
     const files = readdirSync(join(tempDir, '.trace'));
     expect(files).toHaveLength(1);
     expect(files[0]).toMatch(/\.zip$/);
+  });
+});
+
+describe('closeSession overlap', () => {
+  it('shares one teardown between overlapping closes', async () => {
+    const { closeSession } = await import('../../src/session/lifecycle');
+    const { getState } = await import('../../src/session/state');
+    const deleteSession = vi.fn(() => new Promise<void>((r) => setTimeout(r, 10)));
+    const state = getState();
+    state.browsers.set('overlap1', { deleteSession } as unknown as WebdriverIO.Browser);
+    state.sessionMetadata.set('overlap1', { type: 'browser', capabilities: {}, isAttached: false });
+    await Promise.all([closeSession('overlap1', false, false), closeSession('overlap1', false, false)]);
+    expect(deleteSession).toHaveBeenCalledTimes(1);
+    expect(state.browsers.has('overlap1')).toBe(false);
   });
 });

@@ -1,6 +1,6 @@
 import type { RegisteredTool, ToolCallback } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { ToolDefinition } from './types/tool';
-import { getToolSettings, onSessionRegistered, platformOf } from './session/state';
+import { getState, getToolSettings, onSessionsChanged, platformOf } from './session/state';
 import { groupOf, GROUPS, toolAppliesTo, showAllTools, type ToolGroup } from './toolsets';
 import { enableToolsToolDefinition } from './tools/enable-tools.tool';
 
@@ -11,8 +11,12 @@ let listening = false;
 function listenOnce(): void {
   if (listening) return;
   listening = true;
-  onSessionRegistered((metadata) => {
-    getToolSettings().platform = platformOf(metadata);
+  onSessionsChanged((registered) => {
+    if (registered) {
+      getToolSettings().platform = platformOf(registered);
+    } else if (getState().sessionMetadata.size === 0) {
+      getToolSettings().platform = undefined;
+    }
     for (const refresh of refreshers) refresh();
   });
 }
@@ -30,9 +34,11 @@ export function setupToolVisibility(
   if (showAllTools()) return () => {};
   const refresh = () => {
     const { platform, enabledGroups } = getToolSettings();
+    const live = [...getState().sessionMetadata.values()].map(platformOf);
+    const platforms = live.length ? live : [platform];
     for (const [name, tool] of tools) {
       const group = groupOf(name);
-      const listed = toolAppliesTo(name, platform) && (!group || enabledGroups.has(group));
+      const listed = platforms.some((p) => toolAppliesTo(name, p)) && (!group || enabledGroups.has(group));
       if (listed && !tool.enabled) tool.enable();
       if (!listed && tool.enabled) tool.disable();
     }
