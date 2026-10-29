@@ -76,6 +76,7 @@ describe('start_session networkLogs', () => {
       expect.anything(),
       expect.objectContaining({ networkLogs: 'failures' }),
       expect.anything(),
+      { keep: false, name: undefined },
     );
   });
 
@@ -98,6 +99,7 @@ describe('start_session networkLogs', () => {
       expect.anything(),
       expect.objectContaining({ networkLogs: 'none' }),
       expect.anything(),
+      { keep: false, name: undefined },
     );
   });
 
